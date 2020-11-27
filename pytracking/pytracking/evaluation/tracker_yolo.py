@@ -9,8 +9,6 @@ from pytracking.utils.visdom import Visdom
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pytracking.utils.plotting import draw_figure, overlay_mask
-from pytracking.utils.convert_vot_anno_to_rect import convert_vot_anno_to_rect
-from ltr.data.bounding_box_utils import masks_to_bboxes
 from pytracking.evaluation.multi_object_wrapper import MultiObjectWrapper
 from pathlib import Path
 import torch
@@ -67,7 +65,6 @@ class TrackerYolo:
 
         self.visdom = None
 
-
     def _init_visdom(self, visdom_info, debug):
         visdom_info = {} if visdom_info is None else visdom_info
         self.pause_mode = False
@@ -96,7 +93,6 @@ class TrackerYolo:
             elif data['key'] == 'ArrowRight' and self.pause_mode:
                 self.step = True
 
-
     def create_tracker(self, params):
         tracker = self.tracker_class(params)
         tracker.visdom = self.visdom
@@ -108,112 +104,9 @@ class TrackerYolo:
             debug: Debug level.
         """
 
-        # START YOLO
-        # load the COCO class labels our YOLO model was trained on
-        # and the classes that wont be used (coco.names contains the names)
-        # Init a detection flag
-        det_flag = 0
-        labelsPath = "/home/ebo/Parrot_CV_Project/local_yolo/yolo-coco/coco.names"
-        LABELS = open(labelsPath).read().strip().split("\n")
-        outdoor_classes = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-                           17, 18, 19, 20, 21, 22, 23,
-                           29, 30, 31, 32, 33, 34, 35, 36, 37, 38]
+        def yolo_search(W, H, frame_yolo):
 
-        # initialize a list of colors to represent each possible class label
-        np.random.seed(42)
-        COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
-
-        # derive the paths to the YOLO weights and model configuration
-        weightsPath = "/home/ebo/Parrot_CV_Project/local_yolo/yolo-coco/yolov3.weights"
-        configPath = "/home/ebo/Parrot_CV_Project/local_yolo/yolo-coco/yolov3.cfg"
-
-        # load our YOLO object detector trained on COCO dataset (80 classes)
-        print("[INFO] loading YOLO from disk...")
-        net = cv.dnn.readNetFromDarknet(configPath, weightsPath)
-
-        # set CUDA backend
-        # net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-        # net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-
-        # determine only the output layers from yolo
-        ln = net.getLayerNames()
-        ln = [ln[i[0] - 1] for i in net.getUnconnectedOutLayers()]
-
-        (W, H) = (None, None)
-        # END YOLO INIT
-
-        params = self.get_parameters()
-
-        debug_ = debug
-        if debug is None:
-            debug_ = getattr(params, 'debug', 0)
-        params.debug = debug_
-
-        params.tracker_name = self.name
-        params.param_name = self.parameter_name
-        self._init_visdom(visdom_info, debug_)
-
-        multiobj_mode = getattr(params, 'multiobj_mode', getattr(self.tracker_class, 'multiobj_mode', 'default'))
-
-        if multiobj_mode == 'default':
-            tracker = self.create_tracker(params)
-            if hasattr(tracker, 'initialize_features'):
-                tracker.initialize_features()
-
-        elif multiobj_mode == 'parallel':
-            tracker = MultiObjectWrapper(self.tracker_class, params, self.visdom, fast_load=True)
-        else:
-            raise ValueError('Unknown multi object mode {}'.format(multiobj_mode))
-
-        assert os.path.isfile(videofilepath), "Invalid param {}".format(videofilepath)
-        ", videofilepath must be a valid videofile"
-
-        output_boxes = []
-
-        cap = cv.VideoCapture(videofilepath)
-        display_name = 'Display: ' + tracker.params.tracker_name
-        cv.namedWindow(display_name, cv.WINDOW_NORMAL | cv.WINDOW_KEEPRATIO)
-        cv.resizeWindow(display_name, 960, 720)
-        success, frame = cap.read()
-        cv.imshow(display_name, frame)
-
-        def _build_init_info(box):
-            return {'init_bbox': OrderedDict({1: box}), 'init_object_ids': [1, ], 'object_ids': [1, ],
-                    'sequence_object_ids': [1, ]}
-
-        if success is not True:
-            print("Read frame from {} failed.".format(videofilepath))
-            exit(-1)
-        if optional_box is not None:
-            assert isinstance(optional_box, (list, tuple))
-            assert len(optional_box) == 4, "valid box's foramt is [x,y,w,h]"
-            tracker.initialize(frame, _build_init_info(optional_box))
-            output_boxes.append(optional_box)
-        else:
-            while True:
-                # cv.waitKey()
-                frame_disp = frame.copy()
-
-                cv.putText(frame_disp, 'Select target ROI and press ENTER', (20, 30), cv.FONT_HERSHEY_COMPLEX_SMALL,
-                           1.5, (0, 0, 0), 1)
-                # HERE WE MUST HAVE YOLO operating
-                x, y, w, h = cv.selectROI(display_name, frame_disp, fromCenter=False)
-                init_state = [x, y, w, h]
-                tracker.initialize(frame, _build_init_info(init_state))
-                output_boxes.append(init_state)
-                break
-
-        while True:
-            ret, frame = cap.read()
-
-            if frame is None:
-                break
-
-            frame_disp = frame.copy()
-
-            # YOLO IN
             # if the frame dimensions are empty, grab them
-            frame_yolo = frame.copy()
             if W is None or H is None:
                 (H, W) = frame_yolo.shape[:2]
 
@@ -278,60 +171,145 @@ class TrackerYolo:
                     cv.rectangle(frame_yolo, (x, y), (x + w, y + h), color, 2)
                     text = "{}: {:.4f}".format(LABELS[classIDs[i]], confidences[i])
                     cv.putText(frame_yolo, text, (x, y - 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                    if classIDs[i] == 0:
-                        det_flag = 1
-                        tl_yolo = (x, y)  # top left coordinates
-                        br_yolo = ((x + w), (y + h))  # bottom right coordinates
-                        coordinates_text = "{} {}".format(tl_yolo, br_yolo)
-                        cv.rectangle(frame_yolo, tl_yolo, br_yolo, (255, 255, 255), 2)
-            """
-            # if there's a path, write the info
-            if args["output"] != 0:
-                # check if the video writer is None
-                if writer is None:
-                    # initialize our video writer
-                    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-                    writer = cv2.VideoWriter(args["output"], fourcc, 30,
-                                             (frame.shape[1], frame.shape[0]), True)
+                    if classIDs[i] == 45:  # 0 - person, 65 - remote 45 - bowl
+                        detection_flag = 1
+                        tl_coor = (x, y)  # top left coordinates
+                        br_coor = ((x + w), (y + h))  # bottom right coordinates
+                        cv.rectangle(frame_yolo, tl_coor, br_coor, (255, 255, 255), 2)
+                        return tl_coor, br_coor, detection_flag, frame_yolo
+            return (0, 0), (0, 0), 0, frame_yolo
 
-                # write the output frame to disk
-                writer.write(frame)
-            """
-            # YOLO OUT
+        # load the COCO class labels our YOLO model was trained on
+        # and the classes that wont be used (coco.names contains the names)
+        # Init a detection flag
+        det_flag = 0
+        stop_yolo = 0
+        labelsPath = "/home/ebo/Parrot_CV_Project/local_yolo/yolo-coco/coco.names"
+        LABELS = open(labelsPath).read().strip().split("\n")
+        outdoor_classes = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                           17, 18, 19, 20, 21, 22, 23,
+                           29, 30, 31, 32, 33, 34, 35, 36, 37, 38]
 
-            # Draw box
-            out = tracker.track(frame)
-            state = [int(s) for s in out['target_bbox'][1]]
-            output_boxes.append(state)
+        # initialize a list of colors to represent each possible class label
+        np.random.seed(42)
+        COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
 
-            cv.rectangle(frame_disp, (state[0], state[1]), (state[2] + state[0], state[3] + state[1]),
-                         (0, 255, 0), 5)
+        # derive the paths to the YOLO weights and model configuration
+        weightsPath = "/home/ebo/Parrot_CV_Project/local_yolo/yolo-coco/yolov3.weights"
+        configPath = "/home/ebo/Parrot_CV_Project/local_yolo/yolo-coco/yolov3.cfg"
 
-            font_color = (0, 0, 0)
-            cv.putText(frame_disp, 'Tracking!', (20, 30), cv.FONT_HERSHEY_COMPLEX_SMALL, 1,
-                       font_color, 1)
-            cv.putText(frame_disp, 'Press r to reset', (20, 55), cv.FONT_HERSHEY_COMPLEX_SMALL, 1,
-                       font_color, 1)
-            cv.putText(frame_disp, 'Press q to quit', (20, 80), cv.FONT_HERSHEY_COMPLEX_SMALL, 1,
-                       font_color, 1)
+        # load our YOLO object detector trained on COCO dataset (80 classes)
+        print("[INFO] loading YOLO from disk...")
+        net = cv.dnn.readNetFromDarknet(configPath, weightsPath)
+
+        # determine only the output layers from yolo
+        ln = net.getLayerNames()
+        ln = [ln[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+
+        (W, H) = (None, None)
+
+        params = self.get_parameters()
+
+        debug_ = debug
+        if debug is None:
+            debug_ = getattr(params, 'debug', 0)
+        params.debug = debug_
+
+        params.tracker_name = self.name
+        params.param_name = self.parameter_name
+        self._init_visdom(visdom_info, debug_)
+
+        multiobj_mode = getattr(params, 'multiobj_mode', getattr(self.tracker_class, 'multiobj_mode', 'default'))
+
+        if multiobj_mode == 'default':
+            tracker = self.create_tracker(params)
+            if hasattr(tracker, 'initialize_features'):
+                tracker.initialize_features()
+
+        elif multiobj_mode == 'parallel':
+            tracker = MultiObjectWrapper(self.tracker_class, params, self.visdom, fast_load=True)
+        else:
+            raise ValueError('Unknown multi object mode {}'.format(multiobj_mode))
+
+        assert os.path.isfile(videofilepath), "Invalid param {}".format(videofilepath)
+        ", videofilepath must be a valid videofile"
+
+        output_boxes = []
+
+        cap = cv.VideoCapture(videofilepath)
+        display_name = 'Display: ' + tracker.params.tracker_name
+        cv.namedWindow(display_name, cv.WINDOW_NORMAL | cv.WINDOW_KEEPRATIO)
+        cv.resizeWindow(display_name, 960, 720)
+        success, frame = cap.read()
+        cv.imshow(display_name, frame)
+
+        def _build_init_info(box):
+            return {'init_bbox': OrderedDict({1: box}), 'init_object_ids': [1, ], 'object_ids': [1, ],
+                    'sequence_object_ids': [1, ]}
+
+        if success is not True:
+            print("Read frame from {} failed.".format(videofilepath))
+            exit(-1)
+
+        while True:
+            ret, frame = cap.read()
+
+            if frame is None:
+                break
+
+            frame_disp = frame.copy()
+
+            if W is None or H is None:
+                (H, W) = frame_disp.shape[:2]
+
+            if stop_yolo == 0:
+                tl_yolo, br_yolo, det_flag, frame_disp = yolo_search(W, H, frame.copy())
+                cv.putText(frame_disp, "Searching: BOWL", (50, 50), cv.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+
+            if det_flag == 1:
+                if stop_yolo == 0:
+                    stop_yolo = 1
+                    x = tl_yolo[0]
+                    y = tl_yolo[1]
+                    w = abs(br_yolo[0] - tl_yolo[0])
+                    h = abs(br_yolo[1] - tl_yolo[1])
+                    init_state = [x, y, w, h]
+                    tracker.initialize(frame, _build_init_info(init_state))
+                    output_boxes.append(init_state)
+
+                # Draw box
+                out = tracker.track(frame)
+                state = [int(s) for s in out['target_bbox'][1]]
+                output_boxes.append(state)
+
+                tl = (state[0], state[1])
+                br = (state[2] + state[0], state[3] + state[1])
+                w = state[2]
+                h = state[3]
+                cv.rectangle(frame_disp, tl, br, (0, 255, 0), 5)
+
+                center = (int(tl[0] + w/2), int(tl[1] + h/2))
+                cv.circle(frame_disp, center, 3, (0, 0, 255), -1)
+                cv.putText(frame_disp, "FOUND BOWL", (50, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                if center[0] < W*0.40:
+                    cv.putText(frame_disp, "MOVE LEFT", (50, 150), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                elif center[0] > W*0.60:
+                    cv.putText(frame_disp, "MOVE RIGHT", (450, 150), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                if center[1] < H*0.40:
+                    cv.putText(frame_disp, "MOVE UP", (200, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                elif center[1] > H*0.60:
+                    cv.putText(frame_disp, "MOVE DOWN", (200, 300), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                if w*h < W*H*0.05:
+                    cv.putText(frame_disp, "MOVE FORWARD", (int(W/2), int(H/2)), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                elif w*h > W*H*0.15:
+                    cv.putText(frame_disp, "MOVE BACK", (int(W/2), int(H/2)), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
             # Display the resulting frame
             cv.imshow(display_name, frame_disp)
             key = cv.waitKey(1)
+
             if key == ord('q'):
                 break
-            elif key == ord('r'):
-                ret, frame = cap.read()
-                frame_disp = frame.copy()
-
-                cv.putText(frame_disp, 'Select target ROI and press ENTER', (20, 30), cv.FONT_HERSHEY_COMPLEX_SMALL, 1.5,
-                           (0, 0, 0), 1)
-
-                cv.imshow(display_name, frame_disp)
-                x, y, w, h = cv.selectROI(display_name, frame_disp, fromCenter=False)
-                init_state = [x, y, w, h]
-                tracker.initialize(frame, _build_init_info(init_state))
-                output_boxes.append(init_state)
 
         # When everything done, release the capture
         cap.release()
